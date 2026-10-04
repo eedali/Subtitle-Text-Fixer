@@ -276,6 +276,55 @@ finally:
     sys.stdin, sys.stdout = _old_stdin, _old_stdout
 check("G13 cli stdin", rc3 == 0 and "Caf\u00e9" in _captured.getvalue(),
       repr(_captured.getvalue()[:100]))
+
+# Scrollable pages: small window must still reach every control
+root2 = TkinterDnD.Tk()
+root2.withdraw()
+app2 = App(root2)
+check("G17 four scroll pages", len(app2._scroll_pages) == 4)
+with tempfile.TemporaryDirectory() as stmp:
+    for i in range(25):
+        p = os.path.join(stmp, f"f{i:02d}.srt")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+        app2.add_path(p)
+    root2.deiconify()
+    root2.geometry("900x600")
+    root2.update_idletasks()
+    root2.update()
+    page, body, canvas, vbar, _window = app2._scroll_pages[0]
+    bbox = canvas.bbox("all")
+    content_h = (bbox[3] - bbox[1]) if bbox else 0
+    check("G17 content overflows small window", content_h > canvas.winfo_height(),
+          f"content={content_h} view={canvas.winfo_height()}")
+    check("G17 scrollbar appears on overflow", bool(vbar.winfo_ismapped()))
+
+    class _Wheel:
+        def __init__(self, widget, delta=0, num=0):
+            self.widget = widget
+            self.delta = delta
+            self.num = num
+
+    before_y = canvas.yview()[0]
+    result = app2._on_app_wheel(_Wheel(app2.files_card, delta=-240))
+    after_y = canvas.yview()[0]
+    check("G17 wheel scrolls page", result == "break" and after_y > before_y,
+          f"{before_y} -> {after_y}")
+
+    y_before_text = canvas.yview()[0]
+    result_text = app2._on_app_wheel(_Wheel(app2.text_after, delta=-240))
+    check("G17 wheel over Text keeps text scroll",
+          result_text is None and canvas.yview()[0] == y_before_text)
+
+    # Short tab in a tall window -> scrollbar hides again
+    app2.notebook.select(3)  # Advanced tab: tiny content
+    root2.geometry("1120x900")
+    root2.update_idletasks()
+    root2.update()
+    _p3, _b3, _c3, _v3, _w3 = app2._scroll_pages[3]
+    check("G17 scrollbar hides when everything fits",
+          not bool(_v3.winfo_ismapped()))
+root2.destroy()
 print()
 if fails:
     print(f"{len(fails)} GUI TESTS FAILED: {fails}")

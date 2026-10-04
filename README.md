@@ -73,8 +73,9 @@ The Files tab walks you through numbered cards: **1 · Files**, **2 · Preview**
 **1 · Files:**
 
 - Drop `.srt` files onto the blue area (it glows on hover), or **Add Files… / Add Folder…**
-  (recursive). Click a file to see its **BEFORE / AFTER** preview with changes highlighted
-  (pink = original, green = fixed).
+  (recursive). Every tab scrolls, so all controls stay reachable on small windows —
+  the scrollbar appears only when content overflows. Click a file to see its
+  **BEFORE / AFTER** preview with changes highlighted (pink = original, green = fixed).
 - Mixed languages? Select rows, pick a profile in **Profile for selected**, **Apply** —
   overrides show as `[Türkçe]` etc. next to the filename.
 - **Watch folder** row: set watch + output folders and press Start — new `.srt` files
@@ -177,12 +178,13 @@ python test_core.py
 python test_gui.py
 ```
 
-86 checks: 7-script mojibake roundtrips, Turkish auto-trigger, Icelandic/Cyrillic safety
+92 checks: 7-script mojibake roundtrips, Turkish auto-trigger, Icelandic/Cyrillic safety
 gates, byte-collision guard (`Üç`), raw codepages, manual pairs, custom rules, SRT tools
 (shift/overlap/renumber/strip/CPS), dry-run, both backup modes, CSV/HTML reports, folder
 scan, i18n key + placeholder parity across 7 languages, an EN↔TR language-switch regression
 test, diff highlighting, per-file profiles, watch-folder detection, report export, theme
-toggle + per-theme colors, no-doubled-header check, all-language render pass, and
+toggle + per-theme colors, no-doubled-header check, all-language render pass,
+scrollable-tab behavior (overflow, auto-hide scrollbar, wheel routing), and
 end-to-end conversion (GUI + CLI + stdin + packaged `.exe` verified).
 
 ## Limitations

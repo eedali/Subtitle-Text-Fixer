@@ -320,12 +320,13 @@ class App:
         self.file_profiles: dict[str, str] = {}  # path -> profile id override
         self.records: list[ConversionRecord] = []
         self.watcher: FolderWatcher | None = None
+        self._scroll_pages: list = []  # (page, body, canvas, vbar, window)
         self._load_initial_rules()
 
         self._apply_base_theme()
         root.title(f"{APP_TITLE} {__version__}")
         root.geometry("1120x860")
-        root.minsize(1000, 760)
+        root.minsize(880, 620)
 
         self._build_ui()
         self._sync_widgets_from_config()
@@ -371,6 +372,89 @@ class App:
         self.caption_before.configure(foreground=pal["cap_before_fg"])
         self.caption_after.configure(foreground=pal["cap_after_fg"])
         self.diff_legend.configure(foreground=pal["legend_fg"])
+        for _page, _body, canvas, _vbar, _window in self._scroll_pages:
+            try:
+                canvas.configure(background=self._page_bg())
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _page_bg(self) -> str:
+        try:
+            bg = ttk.Style().lookup("TFrame", "background")
+            if bg:
+                return str(bg)
+        except Exception:  # noqa: BLE001
+            pass
+        return "#2b2b2b" if self.theme == "dark" else "#f5f5f5"
+
+    # ------------------------------------------------------- scrollable pages
+    def _make_scrollable_page(self):
+        """Notebook page whose content scrolls when taller than the window.
+
+        Returns (page, body): page goes to the notebook, widgets go in body.
+        The scrollbar only appears when content overflows. Mouse-wheel scrolls
+        the page, except over Text/Listbox/Treeview which keep their own scroll.
+        """
+        page = ttk.Frame(self.notebook)
+        bg = self._page_bg()
+        canvas = tk.Canvas(page, highlightthickness=0, borderwidth=0,
+                           background=bg)
+        vbar = ttk.Scrollbar(page, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=lambda _f, _l, bar=vbar: None)
+        canvas.pack(side="left", fill="both", expand=True)
+        # vbar packed on demand by _refresh_scroll
+        body = ttk.Frame(canvas)
+        window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _refresh(_event=None):
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.itemconfigure(window, width=canvas.winfo_width())
+                need = body.winfo_reqheight() > canvas.winfo_height() + 1
+                mapped = bool(vbar.winfo_ismapped())
+                if need and not mapped:
+                    vbar.pack(side="right", fill="y")
+                    canvas.configure(yscrollcommand=vbar.set)
+                elif not need and mapped:
+                    vbar.pack_forget()
+                    canvas.yview_moveto(0)
+            except Exception:  # noqa: BLE001
+                pass
+
+        body.bind("<Configure>", _refresh)
+        canvas.bind("<Configure>", _refresh)
+        self._scroll_pages.append([page, body, canvas, vbar, window])
+        return page, body
+
+    def _on_app_wheel(self, event):
+        """App-wide wheel: scroll the notebook page under the cursor."""
+        try:
+            widget = event.widget
+            wclass = widget.winfo_class()
+        except Exception:  # noqa: BLE001
+            return None
+        if wclass in ("Text", "Listbox", "Treeview"):
+            return None  # these scroll themselves
+        try:
+            path = str(widget)
+        except Exception:  # noqa: BLE001
+            return None
+        for _page, body, canvas, _vbar, _window in self._scroll_pages:
+            try:
+                if path.startswith(str(body)) and widget.winfo_viewable():
+                    delta = getattr(event, "delta", 0)
+                    if delta:
+                        steps = int(delta / 120) if abs(delta) >= 120 else (
+                            1 if delta > 0 else -1)
+                        canvas.yview_scroll(-steps, "units")
+                    elif getattr(event, "num", 0) in (4, 5):
+                        canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
+                    else:
+                        return None
+                    return "break"
+            except Exception:  # noqa: BLE001
+                return None
+        return None
 
     # ------------------------------------------------------------------ setup
     def _load_initial_rules(self):
@@ -412,20 +496,23 @@ class App:
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=12, pady=4)
+        self.root.bind_all("<MouseWheel>", self._on_app_wheel)
+        self.root.bind_all("<Button-4>", self._on_app_wheel)
+        self.root.bind_all("<Button-5>", self._on_app_wheel)
 
-        self.tab_files = ttk.Frame(self.notebook)
-        self.tab_rules = ttk.Frame(self.notebook)
-        self.tab_tools = ttk.Frame(self.notebook)
-        self.tab_advanced = ttk.Frame(self.notebook)
+        self.tab_files, _files_body = self._make_scrollable_page()
+        self.tab_rules, _rules_body = self._make_scrollable_page()
+        self.tab_tools, _tools_body = self._make_scrollable_page()
+        self.tab_advanced, _advanced_body = self._make_scrollable_page()
         self.notebook.add(self.tab_files, text="files")
         self.notebook.add(self.tab_rules, text="rules")
         self.notebook.add(self.tab_tools, text="tools")
         self.notebook.add(self.tab_advanced, text="advanced")
 
-        self._build_files_tab()
-        self._build_rules_tab()
-        self._build_tools_tab()
-        self._build_advanced_tab()
+        self._build_files_tab(_files_body)
+        self._build_rules_tab(_rules_body)
+        self._build_tools_tab(_tools_body)
+        self._build_advanced_tab(_advanced_body)
 
         log_frame = ttk.Frame(self.root)
         log_frame.pack(fill="both", expand=False, padx=12, pady=(0, 10))
@@ -437,8 +524,8 @@ class App:
         self.log_text.pack(fill="both", expand=True)
         self.log_text.configure(state="disabled")
 
-    def _build_files_tab(self):
-        self.files_card = ttk.LabelFrame(self.tab_files, text="", padding=12)
+    def _build_files_tab(self, parent):
+        self.files_card = ttk.LabelFrame(parent, text="", padding=12)
         self.files_card.pack(fill="x", padx=12, pady=(10, 4))
 
         self.drop_label = tk.Label(self.files_card, font=("Segoe UI", 12, "bold"),
@@ -506,7 +593,7 @@ class App:
         self.watch_status = ttk.Label(watch_row, text="")
         self.watch_status.pack(side="left", padx=6)
 
-        self.preview_card = ttk.LabelFrame(self.tab_files, text="", padding=12)
+        self.preview_card = ttk.LabelFrame(parent, text="", padding=12)
         self.preview_card.pack(fill="both", expand=True, padx=12, pady=4)
         self.preview_caption = ttk.Label(self.preview_card, font=("Segoe UI", 10, "bold"))
         self.preview_caption.pack(anchor="w")
@@ -529,7 +616,7 @@ class App:
         self.diff_legend = ttk.Label(self.preview_card, font=("Segoe UI", 9, "italic"))
         self.diff_legend.pack(anchor="w", pady=(6, 0))
 
-        self.output_card = ttk.LabelFrame(self.tab_files, text="", padding=12)
+        self.output_card = ttk.LabelFrame(parent, text="", padding=12)
         self.output_card.pack(fill="x", padx=12, pady=(4, 10))
         self.settings_box = self.output_card  # alias kept for apply_language()
 
@@ -626,12 +713,12 @@ class App:
         self.drop_label.configure(
             background=pal["drop_hot"] if hot else pal["drop_bg"])
 
-    def _build_rules_tab(self):
+    def _build_rules_tab(self, parent):
         pad = {"padx": 12, "pady": 6}
-        self.rules_hint = ttk.Label(self.tab_rules, wraplength=980, justify="left")
+        self.rules_hint = ttk.Label(parent, wraplength=980, justify="left")
         self.rules_hint.pack(anchor="w", **pad)
 
-        tree_frame = ttk.Frame(self.tab_rules)
+        tree_frame = ttk.Frame(parent)
         tree_frame.pack(fill="both", expand=True, **pad)
         self.rules_tree = ttk.Treeview(tree_frame, columns=("use", "find", "replace", "kind", "note"),
                                        show="headings", height=12)
@@ -641,8 +728,12 @@ class App:
         tree_scroll.pack(side="right", fill="y")
         self.rules_tree.configure(yscrollcommand=tree_scroll.set)
         self.rules_tree.bind("<Double-1>", lambda _e: self.toggle_rule())
+        self.rules_tree.bind("<MouseWheel>",
+                             lambda e: self._tree_wheel(e, -1 * (int(e.delta / 120) or (1 if e.delta > 0 else -1))))
+        self.rules_tree.bind("<Button-4>", lambda _e: self._tree_wheel(None, -1))
+        self.rules_tree.bind("<Button-5>", lambda _e: self._tree_wheel(None, 1))
 
-        rules_buttons = ttk.Frame(self.tab_rules)
+        rules_buttons = ttk.Frame(parent)
         rules_buttons.pack(fill="x", **pad)
         self.rule_add_button = ttk.Button(rules_buttons, command=self.add_rule)
         self.rule_add_button.pack(side="left", padx=(0, 4))
@@ -659,12 +750,12 @@ class App:
         self.rule_save_button = ttk.Button(rules_buttons, command=self.save_rules_dialog)
         self.rule_save_button.pack(side="right", padx=4)
 
-    def _build_tools_tab(self):
+    def _build_tools_tab(self, parent):
         pad = {"padx": 12, "pady": 4}
-        self.tools_note = ttk.Label(self.tab_tools, wraplength=980, justify="left")
+        self.tools_note = ttk.Label(parent, wraplength=980, justify="left")
         self.tools_note.pack(anchor="w", **pad)
 
-        timing_card = ttk.Frame(self.tab_tools, padding=4)
+        timing_card = ttk.Frame(parent, padding=4)
         timing_card.pack(fill="x", padx=8)
         shift_row = ttk.Frame(timing_card)
         shift_row.pack(fill="x", **pad)
@@ -691,7 +782,7 @@ class App:
         self.overlaps_check.pack(anchor="w", **pad)
         self.renumber_check.pack(anchor="w", **pad)
 
-        cleanup_card = ttk.Frame(self.tab_tools, padding=4)
+        cleanup_card = ttk.Frame(parent, padding=4)
         cleanup_card.pack(fill="x", padx=8)
         self.strip_hi_check = ttk.Checkbutton(cleanup_card, variable=self.strip_hi_var,
                                               command=self._on_settings_changed,
@@ -715,11 +806,11 @@ class App:
                     command=self._on_settings_changed).pack(side="left", padx=8)
         self.cps_limit_var.trace_add("write", lambda *_a: self._on_settings_changed())
 
-    def _build_advanced_tab(self):
+    def _build_advanced_tab(self, parent):
         pad = {"padx": 12, "pady": 8}
-        self.adv_hint = ttk.Label(self.tab_advanced, wraplength=980, justify="left")
+        self.adv_hint = ttk.Label(parent, wraplength=980, justify="left")
         self.adv_hint.pack(anchor="w", **pad)
-        pair_row = ttk.Frame(self.tab_advanced)
+        pair_row = ttk.Frame(parent)
         pair_row.pack(fill="x", **pad)
         self.wrong_caption = ttk.Label(pair_row)
         self.wrong_caption.pack(side="left")
@@ -1197,6 +1288,13 @@ class App:
     def _selected_rule_index(self):
         selection = self.rules_tree.selection()
         return int(selection[0]) if selection else None
+
+    def _tree_wheel(self, _event, steps: int):
+        try:
+            self.rules_tree.yview_scroll(steps, "units")
+        except Exception:  # noqa: BLE001
+            pass
+        return "break"
 
     def add_rule(self):
         dialog = RuleDialog(self.root, self.lang)
