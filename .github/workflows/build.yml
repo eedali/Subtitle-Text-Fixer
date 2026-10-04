@@ -6,12 +6,24 @@ on:
       - "v*"
   workflow_dispatch:
 
+permissions:
+  contents: write  # needed to publish GitHub Releases
+
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            label: win
+            gui_test: python test_gui.py
+          - os: macos-latest
+            label: mac
+            gui_test: "echo 'skip GUI test (no display on macOS runners)'"
+          - os: ubuntu-latest
+            label: linux
+            gui_test: xvfb-run -a python test_gui.py
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -23,15 +35,44 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
-      - name: Run tests
-        run: |
-          python test_core.py
-          xvfb-run python test_gui.py || python test_gui.py
+      - name: Run core tests
+        run: python test_core.py
+        shell: bash
+      - name: Run GUI tests
+        run: ${{ matrix.gui_test }}
         shell: bash
       - name: Build
         run: pyinstaller --clean --noconfirm subtitle_fixer.spec
+      - name: Zip portable folder
+        run: python -c "import shutil; print(shutil.make_archive('SubtitleTextFixer-${{ matrix.label }}', 'zip', root_dir='dist', base_dir='SubtitleTextFixer'))"
+        shell: bash
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SubtitleTextFixer-${{ matrix.os }}
-          path: dist/SubtitleTextFixer/
+          name: SubtitleTextFixer-${{ matrix.label }}
+          path: SubtitleTextFixer-${{ matrix.label }}.zip
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SubtitleTextFixer-${{ matrix.label }}.zip
+          generate_release_notes: true
+          body: |
+            ## Subtitle Text Fixer ${{ github.ref_name }}
+
+            Portable build — no installation needed. Pick the zip for your OS below.
+
+            ### Install & run
+            1. Download `SubtitleTextFixer-win.zip` (Windows), `-mac.zip` (macOS) or `-linux.zip` (Linux).
+            2. Unzip anywhere and run `SubtitleTextFixer` (`SubtitleTextFixer.exe` on Windows).
+            3. Drop `.srt` files onto the blue area → press **CONVERT ALL**.
+            > Windows SmartScreen may warn because the app is unsigned: click
+            > *More info → Run anyway*. macOS: right-click → Open on first launch.
+
+            ### Highlights
+            - Fixes broken subtitle text in any language (mojibake, wrong codepages, re-saved files)
+            - 7 UI languages, light/dark theme, before/after diff preview
+            - SRT tools: timing shift, overlap fix, renumber, tag stripping, CPS check
+            - Custom find → replace rules, watch folder, CSV/HTML reports, batch CLI
+
+            CLI users: `SubtitleTextFixer.exe *.srt -o C:\Fixed` (same flags as `python subtitle_fixer.py`).

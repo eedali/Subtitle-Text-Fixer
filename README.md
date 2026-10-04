@@ -3,6 +3,10 @@
 [![Build portable app](https://github.com/eedali/Subtitle-Text-Fixer/actions/workflows/build.yml/badge.svg)](https://github.com/eedali/Subtitle-Text-Fixer/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+> **Just want to use it?** Download the ready-to-run portable build from
+> [**Releases**](https://github.com/eedali/Subtitle-Text-Fixer/releases) (Windows / macOS /
+> Linux zip) — unzip and run, no Python needed.
+
 Fix broken subtitle (`.srt`) text for **any language**: drag & drop → pick output → convert.
 Output is always clean **UTF-8**. Timestamps (`00:02:51,204 --> 00:02:53,161`) are never touched
 by the repair engine (optional timing tools excluded, see below).
