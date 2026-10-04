@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.bak
+.venv/
+.pytest_cache/
+config.json
+custom_rules.json
+examples/output/
+examples/output_exe/
+dist/
+build/

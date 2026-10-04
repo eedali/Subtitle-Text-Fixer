@@ -1,0 +1,25 @@
+{
+  "rules": [
+    {
+      "find": "teh",
+      "replace": "the",
+      "enabled": true,
+      "use_regex": false,
+      "note": "Example: common typo"
+    },
+    {
+      "find": "  +",
+      "replace": " ",
+      "enabled": true,
+      "use_regex": true,
+      "note": "Example: collapse double spaces"
+    },
+    {
+      "find": "Yard\u00fdm",
+      "replace": "Yard\u0131m",
+      "enabled": false,
+      "use_regex": false,
+      "note": "Example (disabled): manual Turkish fix"
+    }
+  ]
+}
