@@ -57,7 +57,7 @@ except ImportError:
     HAS_DND = False
 
 APP_TITLE = "Subtitle Text Fixer"
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 PREVIEW_LINES = 80
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
