@@ -25,6 +25,7 @@ light/dark theme (moon/sun button in the header, remembered between runs).
   formatting tags, reading-speed (CPS) check.
 - **Custom Rules** — your own find → replace list (plain or regex), applied last.
 - **Watch folder** — new `.srt` files are converted automatically.
+- **Video & Subtitle Matcher** — automatically matches mismatched video and subtitle files via smart keyword detection and season/episode parsing (S01E02, 1x02, 201 scene format), renaming and copying subtitles for seamless media player playback.
 - **Reports & backups** — CSV/HTML conversion reports; no/`.bak`/timestamped-folder backups.
 - **Dry run + stdin/stdout** — preview changes without writing; pipe-friendly CLI.
 - **Portable build** — single-folder `.exe` via PyInstaller; CI workflow included.
@@ -121,6 +122,15 @@ script and auto-load on next start (unless `--no-custom`).
 Force a reinterpretation pair — *"wrongly read as X, actually is Y"*
 (e.g. `cp1252 → cp1251` for re-saved Cyrillic). Applies to both Preview and Convert.
 CLI equivalent: `--pair cp1252:cp1251`.
+
+**Matcher tab:**
+
+Pair video files with differently-named subtitle files so that media players can load them automatically:
+- Select the **Video folder** and the **Subtitle folder**.
+- Press **Scan & Match** (`Ara` / `Zuordnen` / `Rechercher` etc.).
+- The smart matching engine extracts TV season/episode numbers (`S01E02`, `1x02`, `201` scene notation), release years, and computes TF-IDF weighted token frequencies to accurately pair files even when filenames differ significantly (e.g. `Lost (2004) - S02E01 - Man of Science...` ↔ `Lost 201 - Man of Science...`).
+- Inspect the matched pairs and score ratings in the table.
+- Press **Rename & Copy**: matched subtitles are copied into a newly created `Renamed` subfolder inside the subtitle folder, renamed to match their corresponding video file stems (`.srt`).
 
 ## CLI reference
 

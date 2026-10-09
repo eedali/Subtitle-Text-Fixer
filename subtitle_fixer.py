@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -76,6 +78,27 @@ PAIR_CODECS = [
 ]
 BACKUP_MODES = ("none", "bak", "folder")
 
+VIDEO_EXTENSIONS = (
+    ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
+    ".m4v", ".mpg", ".mpeg", ".ts", ".vob", ".m2ts",
+)
+SUBTITLE_EXTENSIONS = (
+    ".srt", ".sub", ".ass", ".ssa", ".vtt",
+)
+
+NOISE_TOKENS = {
+    "480p", "576p", "720p", "1080p", "1080i", "2160p", "4k", "uhd", "fhd", "hd", "sd",
+    "bluray", "blu-ray", "bdrip", "brrip", "webrip", "web-dl", "webdl", "web",
+    "hdtv", "pdtv", "dvdrip", "dvdr", "dvd", "remux", "hdrip", "tvrip", "cam", "telesync",
+    "x264", "x265", "h264", "h265", "hevc", "avc", "xvid", "divx", "10bit", "8bit", "hdr", "sdr",
+    "aac", "ac3", "dts", "dtshd", "dts-hd", "truehd", "atmos", "dd5", "ddp5", "dd2", "eac3", "flac", "mp3",
+    "proper", "repack", "rerip", "extended", "unrated", "directors", "cut", "internal",
+    "yify", "rarbg", "eztv", "sparks", "rovers", "dimension", "fleet", "killers",
+    "srt", "sub", "ass", "ssa", "vtt", "subtitles", "subtitle", "altyazi", "altyazı",
+    "forced", "full", "sdh", "cc", "hi", "eng", "tur", "spa", "fre", "ger", "ita", "rus",
+    "english", "turkish", "spanish", "french", "german", "russian",
+}
+
 # Custom (non-ttk) widget colors per theme. ttk widgets follow sv-ttk.
 PALETTES = {
     "light": {
@@ -100,7 +123,8 @@ PALETTES = {
 
 DEFAULT_CONFIG = {
     "ui_lang": None,  # None -> system language
-    "theme": "light",    "profile": "auto",
+    "theme": "light",
+    "profile": "auto",
     "source": "auto",
     "target": "utf-8-sig",
     "output_dir": "",
@@ -118,6 +142,8 @@ DEFAULT_CONFIG = {
     "rules_path": DEFAULT_RULES_PATH,
     "watch_dir": "",
     "watch_interval": 5,
+    "matcher_video_dir": "",
+    "matcher_sub_dir": "",
     "tools": {
         "shift_ms": 0,
         "fix_overlaps": False,
@@ -307,6 +333,242 @@ class RuleDialog:
         self.top.destroy()
 
 
+# ------------------------------------------------------------------ Matcher Engine
+def _extract_ep_info(stem: str) -> tuple[int | None, int | None, int | None]:
+    """Extract (season, episode, composite_code) from filename stem.
+
+    Examples:
+    - "Lost - S02E01" -> (2, 1, 201)
+    - "Lost 201" -> (2, 1, 201)
+    - "Lost - 2x01" -> (2, 1, 201)
+    - "Anime - 05" -> (None, 5, 5)
+    """
+    # 1. S01E02, S1E2, Season 1 Episode 2, Sezon 1 Bolum 2
+    m = re.search(r'(?i)\bs(?:eason)?[\.\-_ ]*(\d{1,2})[\.\-_ ]*(?:e|ep|episode|bolum|bölüm)[\.\-_ ]*(\d{1,3})\b', stem)
+    if m:
+        s, e = int(m.group(1)), int(m.group(2))
+        return s, e, s * 100 + e
+
+    # 2. 1x02, 01x02
+    m = re.search(r'(?i)\b(\d{1,2})x(\d{1,3})\b', stem)
+    if m:
+        s, e = int(m.group(1)), int(m.group(2))
+        return s, e, s * 100 + e
+
+    # 3. Standard 3-digit TV scene notation: [1-9]\d{2} (e.g. 201 -> S02E01, 124 -> S01E24)
+    for m in re.finditer(r'\b([1-9])(\d{2})\b', stem):
+        val = int(m.group(0))
+        if val in (480, 576, 720, 264, 265):
+            continue
+        ep = int(m.group(2))
+        if ep >= 1:
+            s = int(m.group(1))
+            return s, ep, val
+
+    # 4. Standard 4-digit notation for seasons >= 10: (e.g. 1001 -> S10E01)
+    for m in re.finditer(r'\b(1[0-9]|2[0-9])(\d{2})\b', stem):
+        val = int(m.group(0))
+        if 1900 <= val <= 2099:
+            continue
+        ep = int(m.group(2))
+        if ep >= 1:
+            s = int(m.group(1))
+            return s, ep, val
+
+    # 5. EP02, E02, Episode 02, Bölüm 02
+    m = re.search(r'(?i)\b(?:e|ep|episode|bolum|bölüm)[\.\-_ ]*(\d{1,3})\b', stem)
+    if m:
+        e = int(m.group(1))
+        return None, e, e
+
+    # 6. Standalone number pattern like " - 02 " or "[02]"
+    m = re.search(r'(?:^|[\s\-_\[(])(\d{1,3})(?:[\s\-_\])]|$)', stem)
+    if m:
+        val = int(m.group(1))
+        if val not in (480, 576, 720, 1080, 2160, 264, 265) and not (1900 <= val <= 2099):
+            return None, val, val
+
+    return None, None, None
+
+
+def _extract_year(stem: str) -> int | None:
+    """Extract 4-digit release year (1900-2099)."""
+    m = re.search(r'\b(19\d\d|20\d\d)\b', stem)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _tokenize_stem(stem: str) -> set[str]:
+    """Tokenize filename stem, dropping common noise words and enriching episode aliases."""
+    s, e, comp = _extract_ep_info(stem)
+
+    cleaned = re.sub(r'[\.\-_\+\[\]\(\)\{\}\~,;!@#\$%\^&\*=\<\>\?\/\\|]', ' ', stem).lower()
+    tokens = set()
+    for tok in cleaned.split():
+        tok = tok.strip()
+        if not tok or tok in NOISE_TOKENS:
+            continue
+        if re.match(r'^(x264|x265|h264|h265|1080p|720p|480p|2160p|4k|uhd)$', tok):
+            continue
+        tokens.add(tok)
+
+    # Inject normalized episode representations for cross-format keyword matching
+    if e is not None:
+        tokens.add(f"e{e:02d}")
+        tokens.add(str(e))
+    if s is not None and e is not None:
+        tokens.add(f"s{s:02d}e{e:02d}")
+        tokens.add(f"{s}x{e:02d}")
+        tokens.add(str(s * 100 + e))
+    elif comp is not None:
+        tokens.add(str(comp))
+
+    return tokens
+
+
+def _natural_sort_key(path: str):
+    base = os.path.basename(path)
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', base)]
+
+
+def _calc_pair_score(v_name: str, s_name: str,
+                     v_toks: set[str], s_toks: set[str],
+                     v_ep: tuple[int | None, int | None, int | None],
+                     s_ep: tuple[int | None, int | None, int | None],
+                     v_year: int | None, s_year: int | None,
+                     idf: dict[str, float]) -> float:
+    score = 0.0
+
+    v_s, v_e, v_comp = v_ep
+    s_s, s_e, s_comp = s_ep
+
+    # 1. Season & Episode matching
+    if v_comp is not None and s_comp is not None:
+        if v_comp == s_comp:
+            score += 55.0
+            if v_s is not None and s_s is not None and v_s == s_s:
+                score += 15.0
+        elif v_e is not None and s_e is not None and v_e == s_e:
+            score += 45.0
+            if v_s is not None and s_s is not None:
+                if v_s == s_s:
+                    score += 15.0
+                else:
+                    return -100.0  # Conflicting seasons
+        else:
+            return -100.0  # Conflicting episodes
+    elif v_e is not None or s_e is not None:
+        ep_val = v_e if v_e is not None else s_e
+        other_toks = s_toks if v_e is not None else v_toks
+        if str(ep_val) in other_toks or f"{ep_val:02d}" in other_toks:
+            score += 40.0
+
+    # 2. Release Year matching
+    if v_year is not None and s_year is not None:
+        if v_year == s_year:
+            score += 15.0
+        else:
+            score -= 30.0
+
+    # 3. Common keywords weighted by IDF
+    shared = v_toks.intersection(s_toks)
+    if shared:
+        shared_weight = sum(idf.get(t, 1.0) for t in shared)
+        max_possible = max(sum(idf.get(t, 1.0) for t in v_toks), 1.0)
+        score += (shared_weight / max_possible) * 35.0
+
+    # 4. Fuzzy SequenceMatcher ratio
+    v_clean = " ".join(sorted(v_toks))
+    s_clean = " ".join(sorted(s_toks))
+    if v_clean and s_clean:
+        ratio = difflib.SequenceMatcher(None, v_clean, s_clean).ratio()
+        score += ratio * 20.0
+    else:
+        v_stem, _ = os.path.splitext(v_name)
+        s_stem, _ = os.path.splitext(s_name)
+        ratio = difflib.SequenceMatcher(None, v_stem.lower(), s_stem.lower()).ratio()
+        score += ratio * 20.0
+
+    return score
+
+
+def match_media_files(video_paths: list[str], sub_paths: list[str]) -> list[dict]:
+    """Matches video files to subtitle files using smart keyword & token frequency analysis."""
+    v_sorted = sorted(video_paths, key=_natural_sort_key)
+    s_sorted = sorted(sub_paths, key=_natural_sort_key)
+
+    v_names = [os.path.basename(p) for p in v_sorted]
+    s_names = [os.path.basename(p) for p in s_sorted]
+
+    v_stems = [os.path.splitext(n)[0] for n in v_names]
+    s_stems = [os.path.splitext(n)[0] for n in s_names]
+
+    all_v_tokens = [_tokenize_stem(s) for s in v_stems]
+    all_s_tokens = [_tokenize_stem(s) for s in s_stems]
+
+    v_eps = [_extract_ep_info(s) for s in v_stems]
+    s_eps = [_extract_ep_info(s) for s in s_stems]
+
+    v_years = [_extract_year(s) for s in v_stems]
+    s_years = [_extract_year(s) for s in s_stems]
+
+    # Calculate token frequencies and IDF across all documents
+    total_docs = len(v_sorted) + len(s_sorted)
+    doc_freq: dict[str, int] = {}
+    for toks in all_v_tokens + all_s_tokens:
+        for t in toks:
+            doc_freq[t] = doc_freq.get(t, 0) + 1
+
+    idf: dict[str, float] = {}
+    for t, df in doc_freq.items():
+        idf[t] = 1.0 + math.log((total_docs + 1.0) / (df + 1.0))
+
+    # Evaluate candidate pairings
+    candidates = []
+    for vi, v_path in enumerate(v_sorted):
+        for si, s_path in enumerate(s_sorted):
+            score = _calc_pair_score(
+                v_names[vi], s_names[si],
+                all_v_tokens[vi], all_s_tokens[si],
+                v_eps[vi], s_eps[si],
+                v_years[vi], s_years[si],
+                idf
+            )
+            if score >= 15.0:
+                candidates.append((score, vi, si))
+
+    # Greedy best-match assignment
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    matched_v: dict[int, tuple[int, float]] = {}
+    matched_s: set[int] = set()
+
+    for score, vi, si in candidates:
+        if vi not in matched_v and si not in matched_s:
+            matched_v[vi] = (si, score)
+            matched_s.add(si)
+
+    # Compile result list in natural order of videos
+    results = []
+    for vi, v_path in enumerate(v_sorted):
+        if vi in matched_v:
+            si, score = matched_v[vi]
+            norm_score = min(100, max(1, int(score)))
+            results.append({
+                "video_path": v_path,
+                "sub_path": s_sorted[si],
+                "score": norm_score,
+            })
+        else:
+            results.append({
+                "video_path": v_path,
+                "sub_path": None,
+                "score": 0,
+            })
+
+    return results
+
+
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -321,6 +583,9 @@ class App:
         self.records: list[ConversionRecord] = []
         self.watcher: FolderWatcher | None = None
         self._scroll_pages: list = []  # (page, body, canvas, vbar, window)
+        self.matcher_video_var = tk.StringVar(value=self.config.get("matcher_video_dir", ""))
+        self.matcher_sub_var = tk.StringVar(value=self.config.get("matcher_sub_dir", ""))
+        self.matcher_matches: list[dict] = []
         self._load_initial_rules()
 
         self._apply_base_theme()
@@ -504,15 +769,18 @@ class App:
         self.tab_rules, _rules_body = self._make_scrollable_page()
         self.tab_tools, _tools_body = self._make_scrollable_page()
         self.tab_advanced, _advanced_body = self._make_scrollable_page()
+        self.tab_matcher, _matcher_body = self._make_scrollable_page()
         self.notebook.add(self.tab_files, text="files")
         self.notebook.add(self.tab_rules, text="rules")
         self.notebook.add(self.tab_tools, text="tools")
         self.notebook.add(self.tab_advanced, text="advanced")
+        self.notebook.add(self.tab_matcher, text="matcher")
 
         self._build_files_tab(_files_body)
         self._build_rules_tab(_rules_body)
         self._build_tools_tab(_tools_body)
         self._build_advanced_tab(_advanced_body)
+        self._build_matcher_tab(_matcher_body)
 
         log_frame = ttk.Frame(self.root)
         log_frame.pack(fill="both", expand=False, padx=12, pady=(0, 10))
@@ -827,8 +1095,71 @@ class App:
                                                  command=self._on_settings_changed)
         self.manual_pair_check.pack(side="left", padx=12)
 
+    def _build_matcher_tab(self, parent):
+        pad = {"padx": 12, "pady": 6}
+        self.matcher_hint = ttk.Label(parent, wraplength=980, justify="left")
+        self.matcher_hint.pack(anchor="w", **pad)
+
+        folders_card = ttk.LabelFrame(parent, text="", padding=12)
+        folders_card.pack(fill="x", padx=12, pady=(4, 6))
+
+        # Video folder row
+        vrow = ttk.Frame(folders_card)
+        vrow.pack(fill="x", pady=4)
+        self.matcher_video_caption = ttk.Label(vrow, width=22, anchor="w")
+        self.matcher_video_caption.pack(side="left")
+        self.matcher_video_entry = ttk.Entry(vrow, textvariable=self.matcher_video_var)
+        self.matcher_video_entry.pack(side="left", fill="x", expand=True, padx=6)
+        self.matcher_video_browse = ttk.Button(vrow, command=self.browse_matcher_video)
+        self.matcher_video_browse.pack(side="left")
+
+        # Subtitle folder row
+        srow = ttk.Frame(folders_card)
+        srow.pack(fill="x", pady=4)
+        self.matcher_sub_caption = ttk.Label(srow, width=22, anchor="w")
+        self.matcher_sub_caption.pack(side="left")
+        self.matcher_sub_entry = ttk.Entry(srow, textvariable=self.matcher_sub_var)
+        self.matcher_sub_entry.pack(side="left", fill="x", expand=True, padx=6)
+        self.matcher_sub_browse = ttk.Button(srow, command=self.browse_matcher_sub)
+        self.matcher_sub_browse.pack(side="left")
+
+        # Scan button & summary row
+        action_row = ttk.Frame(folders_card)
+        action_row.pack(fill="x", pady=(8, 0))
+        self.matcher_scan_button = ttk.Button(action_row, command=self.matcher_scan,
+                                              style="Accent.TButton")
+        self.matcher_scan_button.pack(side="left")
+        self.matcher_status_label = ttk.Label(action_row, font=("Segoe UI", 9, "italic"))
+        self.matcher_status_label.pack(side="left", padx=12)
+
+        # Treeview card for matched pairs
+        tree_frame = ttk.Frame(parent)
+        tree_frame.pack(fill="both", expand=True, padx=12, pady=6)
+        self.matcher_tree = ttk.Treeview(tree_frame, columns=("video", "subtitle", "score"),
+                                         show="headings", height=14)
+        self.matcher_tree.pack(side="left", fill="both", expand=True)
+        matcher_scroll = ttk.Scrollbar(tree_frame, orient="vertical",
+                                       command=self.matcher_tree.yview)
+        matcher_scroll.pack(side="right", fill="y")
+        self.matcher_tree.configure(yscrollcommand=matcher_scroll.set)
+        self.matcher_tree.bind("<MouseWheel>",
+                               lambda e: self._matcher_tree_wheel(e, -1 * (int(e.delta / 120) or (1 if e.delta > 0 else -1))))
+        self.matcher_tree.bind("<Button-4>", lambda _e: self._matcher_tree_wheel(None, -1))
+        self.matcher_tree.bind("<Button-5>", lambda _e: self._matcher_tree_wheel(None, 1))
+
+        # Bottom buttons row: Apply & Clear
+        btn_row = ttk.Frame(parent)
+        btn_row.pack(fill="x", padx=12, pady=(6, 12))
+        self.matcher_apply_button = ttk.Button(btn_row, command=self.matcher_apply,
+                                               style="Accent.TButton")
+        self.matcher_apply_button.pack(side="left", padx=(0, 6), ipadx=12, ipady=4)
+        self.matcher_clear_button = ttk.Button(btn_row, command=self.matcher_clear)
+        self.matcher_clear_button.pack(side="left", padx=6)
+
     # ------------------------------------------------------------------ config
     def _sync_widgets_from_config(self):
+        self.matcher_video_var.set(self.config.get("matcher_video_dir", ""))
+        self.matcher_sub_var.set(self.config.get("matcher_sub_dir", ""))
         self.output_dir_var.set(self.config.get("output_dir", ""))
         self.same_dir_var.set(bool(self.config.get("same_dir", True)))
         self.suffix_var.set(self.config.get("suffix", "_fixed"))
@@ -904,6 +1235,8 @@ class App:
             "rules_path": self.config.get("rules_path", DEFAULT_RULES_PATH),
             "watch_dir": self.watch_dir_var.get(),
             "watch_interval": self._watch_interval(),
+            "matcher_video_dir": self.matcher_video_var.get().strip(),
+            "matcher_sub_dir": self.matcher_sub_var.get().strip(),
             "tools": {
                 "shift_ms": self._shift_ms(),
                 "fix_overlaps": self.overlaps_var.get(),
@@ -938,6 +1271,7 @@ class App:
         self.notebook.tab(self.tab_rules, text=t(lang, "tab_rules"))
         self.notebook.tab(self.tab_tools, text=t(lang, "tab_tools"))
         self.notebook.tab(self.tab_advanced, text=t(lang, "tab_advanced"))
+        self.notebook.tab(self.tab_matcher, text=t(lang, "tab_matcher"))
 
         self.drop_label.configure(
             text=t(lang, "drop_dnd") if HAS_DND else t(lang, "drop_no_dnd"))
@@ -1040,6 +1374,21 @@ class App:
         self.wrong_caption.configure(text=t(lang, "adv_wrong_label"))
         self.right_caption.configure(text=t(lang, "adv_right_label"))
         self.manual_pair_check.configure(text=t(lang, "adv_use_pair"))
+
+        self.matcher_hint.configure(text=t(lang, "matcher_hint"))
+        self.matcher_video_caption.configure(text=t(lang, "matcher_video_folder"))
+        self.matcher_sub_caption.configure(text=t(lang, "matcher_sub_folder"))
+        self.matcher_video_browse.configure(text=t(lang, "btn_browse"))
+        self.matcher_sub_browse.configure(text=t(lang, "btn_browse"))
+        self.matcher_scan_button.configure(text=t(lang, "matcher_btn_scan"))
+        self.matcher_apply_button.configure(text=t(lang, "matcher_btn_apply"))
+        self.matcher_clear_button.configure(text=t(lang, "matcher_btn_clear"))
+        self.matcher_tree.heading("video", text=t(lang, "matcher_col_video"))
+        self.matcher_tree.heading("subtitle", text=t(lang, "matcher_col_subtitle"))
+        self.matcher_tree.heading("score", text=t(lang, "matcher_col_score"))
+        self.matcher_tree.column("video", width=360)
+        self.matcher_tree.column("subtitle", width=360)
+        self.matcher_tree.column("score", width=80, anchor="center")
 
         self._refresh_file_list()
         self.refresh_preview()
@@ -1570,6 +1919,135 @@ class App:
             self._log(t(self.lang, "report_saved", path=path))
         except (OSError, ValueError) as exc:
             messagebox.showerror(APP_TITLE, str(exc))
+
+    # ------------------------------------------------------------------ matcher tab
+    def _matcher_tree_wheel(self, _event, steps: int):
+        try:
+            self.matcher_tree.yview_scroll(steps, "units")
+        except Exception:  # noqa: BLE001
+            pass
+        return "break"
+
+    def browse_matcher_video(self):
+        initial = self.matcher_video_var.get().strip() or os.path.expanduser("~")
+        path = filedialog.askdirectory(parent=self.root, initialdir=initial,
+                                      title=t(self.lang, "matcher_video_folder"))
+        if path:
+            self.matcher_video_var.set(os.path.normpath(path))
+            self._persist()
+
+    def browse_matcher_sub(self):
+        initial = self.matcher_sub_var.get().strip() or os.path.expanduser("~")
+        path = filedialog.askdirectory(parent=self.root, initialdir=initial,
+                                      title=t(self.lang, "matcher_sub_folder"))
+        if path:
+            self.matcher_sub_var.set(os.path.normpath(path))
+            self._persist()
+
+    def matcher_clear(self):
+        self.matcher_matches = []
+        self.matcher_tree.delete(*self.matcher_tree.get_children())
+        self.matcher_status_label.configure(text="")
+
+    def matcher_scan(self):
+        vdir = self.matcher_video_var.get().strip()
+        sdir = self.matcher_sub_var.get().strip()
+        if not vdir or not os.path.isdir(vdir):
+            messagebox.showwarning(APP_TITLE, t(self.lang, "matcher_no_video"))
+            return
+        if not sdir or not os.path.isdir(sdir):
+            messagebox.showwarning(APP_TITLE, t(self.lang, "matcher_no_sub"))
+            return
+
+        self._persist()
+        self.matcher_status_label.configure(text=t(self.lang, "matcher_scanning"))
+        self.root.update_idletasks()
+
+        video_files = []
+        try:
+            for entry in os.scandir(vdir):
+                if entry.is_file():
+                    _, ext = os.path.splitext(entry.name)
+                    if ext.lower() in VIDEO_EXTENSIONS:
+                        video_files.append(entry.path)
+        except OSError as e:
+            messagebox.showerror(APP_TITLE, str(e))
+            self.matcher_status_label.configure(text="")
+            return
+
+        sub_files = []
+        try:
+            for entry in os.scandir(sdir):
+                if entry.is_file():
+                    _, ext = os.path.splitext(entry.name)
+                    if ext.lower() in SUBTITLE_EXTENSIONS:
+                        sub_files.append(entry.path)
+        except OSError as e:
+            messagebox.showerror(APP_TITLE, str(e))
+            self.matcher_status_label.configure(text="")
+            return
+
+        if not video_files:
+            messagebox.showinfo(APP_TITLE, t(self.lang, "matcher_no_video"))
+            self.matcher_status_label.configure(text="")
+            return
+        if not sub_files:
+            messagebox.showinfo(APP_TITLE, t(self.lang, "matcher_no_sub"))
+            self.matcher_status_label.configure(text="")
+            return
+
+        matches = match_media_files(video_files, sub_files)
+        self.matcher_matches = matches
+        self.matcher_tree.delete(*self.matcher_tree.get_children())
+
+        matched_count = 0
+        for i, m in enumerate(matches):
+            v_name = os.path.basename(m["video_path"])
+            s_name = os.path.basename(m["sub_path"]) if m["sub_path"] else t(self.lang, "matcher_unmatched")
+            score_text = f"{m['score']}%" if m["sub_path"] else "-"
+            if m["sub_path"]:
+                matched_count += 1
+                self._log(t(self.lang, "matcher_log_pair", video=v_name, sub=s_name, score=score_text))
+            self.matcher_tree.insert("", "end", iid=str(i), values=(v_name, s_name, score_text))
+
+        summary = t(self.lang, "matcher_found", nv=len(video_files), ns=len(sub_files), nm=matched_count)
+        self.matcher_status_label.configure(text=summary)
+        self._log(summary)
+
+    def matcher_apply(self):
+        valid_matches = [m for m in self.matcher_matches if m.get("sub_path")]
+        if not valid_matches:
+            messagebox.showinfo(APP_TITLE, t(self.lang, "matcher_no_matches"))
+            return
+
+        sdir = self.matcher_sub_var.get().strip()
+        out_folder_name = t(self.lang, "matcher_output_folder")
+        out_folder = os.path.join(sdir, out_folder_name)
+        try:
+            os.makedirs(out_folder, exist_ok=True)
+        except OSError as e:
+            messagebox.showerror(APP_TITLE, str(e))
+            return
+
+        copied_count = 0
+        for m in valid_matches:
+            v_name = os.path.basename(m["video_path"])
+            s_path = m["sub_path"]
+            v_stem, _ = os.path.splitext(v_name)
+            _, s_ext = os.path.splitext(s_path)
+            s_ext = s_ext or ".srt"
+            target_name = f"{v_stem}{s_ext}"
+            target_path = os.path.join(out_folder, target_name)
+            try:
+                shutil.copy2(s_path, target_path)
+                copied_count += 1
+                self._log(t(self.lang, "matcher_log_copy", src=os.path.basename(s_path), dst=target_name))
+            except OSError as e:
+                self._log(f"Error copying {s_path}: {e}")
+
+        msg = t(self.lang, "matcher_applied", n=copied_count, folder=out_folder)
+        self._log(msg)
+        messagebox.showinfo(APP_TITLE, msg)
 
 
 # ------------------------------------------------------------------ batch CLI
