@@ -71,6 +71,7 @@ jobs:
 
             ### Highlights
             - Fixes broken subtitle text in any language (mojibake, wrong codepages, re-saved files)
+            - Video & Subtitle Matcher: smart keyword and episode matching with automatic rename & copy
             - 7 UI languages, light/dark theme, before/after diff preview
             - SRT tools: timing shift, overlap fix, renumber, tag stripping, CPS check
             - Custom find → replace rules, watch folder, CSV/HTML reports, batch CLI

@@ -281,7 +281,7 @@ check("G13 cli stdin", rc3 == 0 and "Caf\u00e9" in _captured.getvalue(),
 root2 = TkinterDnD.Tk()
 root2.withdraw()
 app2 = App(root2)
-check("G17 four scroll pages", len(app2._scroll_pages) == 4)
+check("G17 five scroll pages", len(app2._scroll_pages) == 5)
 with tempfile.TemporaryDirectory() as stmp:
     for i in range(25):
         p = os.path.join(stmp, f"f{i:02d}.srt")
